@@ -13,15 +13,15 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 不配 registry-url：它写入的 .npmrc 引用 NODE_AUTH_TOKEN，
       # Trusted Publishing (OIDC) 免 token，npm >=11.5.1 自动走 id-token 交换
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           # 锁大版本与本地一致；latest 曾在 pnpm 11 要求 Node>=22.13 时炸过 CI
           version: '10'
