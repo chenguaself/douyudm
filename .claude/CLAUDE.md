@@ -13,6 +13,7 @@ pnpm test                     # Jest，全部测试
 pnpm run test:coverage        # 必须 100% 覆盖 src/core/stt.ts 和 src/core/packet.ts，否则 CI 失败
 pnpm run test:stt             # 单跑 STT
 pnpm run test:packet          # 单跑 Packet
+pnpm run test:ports           # 真实网络测试：6 个弹幕端口可用性（默认套件不含，CI 不跑）
 ```
 
 ## 架构（src/ 五层）

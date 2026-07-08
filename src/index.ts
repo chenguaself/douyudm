@@ -43,7 +43,7 @@ function defaultWsFactory(url: string): IWebSocket {
   return new WebSocket(url) as unknown as IWebSocket;
 }
 
-const DANMU_PORTS = [8501, 8502, 8503, 8504, 8505, 8506];
+export const DANMU_PORTS = [8501, 8502, 8503, 8504, 8505, 8506];
 
 function randomPort(): number {
   return DANMU_PORTS[Math.floor(Math.random() * DANMU_PORTS.length)];

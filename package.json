@@ -79,6 +79,7 @@
     "test": "jest",
     "test:stt": "jest __tests__/stt.test.ts",
     "test:packet": "jest __tests__/packet.test.ts",
+    "test:ports": "jest __tests__/ports.live.test.ts --testPathIgnorePatterns=/node_modules/",
     "test:coverage": "jest --coverage",
     "prepublishOnly": "npm run build"
   }
