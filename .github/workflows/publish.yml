@@ -17,12 +17,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - uses: pnpm/action-setup@v4
         with:
-          version: latest
+          # 锁大版本与本地一致；latest 曾在 pnpm 11 要求 Node>=22.13 时炸过 CI
+          version: '10'
 
       - name: Sync version from tag
         run: |
