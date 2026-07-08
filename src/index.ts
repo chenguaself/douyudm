@@ -49,7 +49,19 @@ function randomPort(): number {
   return DANMU_PORTS[Math.floor(Math.random() * DANMU_PORTS.length)];
 }
 
+const WS_CONNECTING = 0;
 const WS_OPEN = 1;
+
+/** ws 的 ErrorEvent / DOM ErrorEvent / Error / 其他值统一转 Error（String(event) 会得到无用的 "[object Object]"） */
+function toError(event: unknown): Error {
+  if (event instanceof Error) return event;
+  if (typeof event === 'object' && event !== null) {
+    const e = event as { error?: unknown; message?: unknown };
+    if (e.error instanceof Error) return e.error;
+    if (e.message) return new Error(String(e.message));
+  }
+  return new Error(String(event));
+}
 
 export class Client implements IClient {
   readonly roomId: string | number;
@@ -87,10 +99,8 @@ export class Client implements IClient {
   run(url?: string): void {
     // 重复 run()：先拆掉旧连接，避免泄漏和旧 socket 事件串扰
     if (this._ws) {
-      const old = this._ws;
+      this._teardown(this._ws);
       this._ws = null;
-      old.onopen = old.onerror = old.onclose = old.onmessage = null;
-      old.close();
     }
     if (this._heartbeatTask !== null) {
       clearInterval(this._heartbeatTask);
@@ -109,7 +119,7 @@ export class Client implements IClient {
 
     ws.onerror = (event) => {
       if (this._ws === ws) {
-        this._emit('error', event instanceof Error ? event : new Error(String(event)));
+        this._emit('error', toError(event));
       }
     };
 
@@ -139,10 +149,25 @@ export class Client implements IClient {
 
   close(): void {
     this._logout();
-    if (this._ws) {
-      // 不立刻置空：close 帧完成后 onclose 里统一清理并触发 disconnect
-      this._ws.close();
+    const ws = this._ws;
+    if (!ws) return;
+    if (ws.readyState === WS_CONNECTING) {
+      // 连接未建立：直接拆除。ws 库在 close-before-established 时会 emit 'error'，
+      // 不吞掉会向用户抛出无意义的错误事件
+      this._teardown(ws);
+      this._ws = null;
+      return;
     }
+    // 已建立（或关闭中）的连接：不立刻置空，close 帧完成后 onclose 里统一清理并触发 disconnect
+    ws.close();
+  }
+
+  /** 解绑事件并关闭 socket；onerror 换成空函数而不是 null——
+   *  ws 在 close-before-established 时 emit 'error'，无监听器会崩掉进程 */
+  private _teardown(ws: IWebSocket): void {
+    ws.onopen = ws.onclose = ws.onmessage = null;
+    ws.onerror = () => {};
+    ws.close();
   }
 
   private _emit(event: ClientEventName, err?: Error): void {

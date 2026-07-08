@@ -22,6 +22,13 @@ class MockWS implements IWebSocket {
     this.closed = true;
     const was = this.readyState;
     this.readyState = 3;
+    if (was === 0) {
+      // 模拟 ws 库行为:连接建立前 close 会 emit 'error';
+      // 真实 EventEmitter 在无监听器时会崩掉进程,这里用 throw 等价模拟
+      const err = new Error('WebSocket was closed before the connection was established');
+      if (this.onerror) this.onerror(err);
+      else throw err;
+    }
     if (was !== 3 && this.onclose) this.onclose({});
   }
 
@@ -62,6 +69,25 @@ describe('Client 生命周期', () => {
     expect(() => client.close()).not.toThrow();
     expect(sockets[0].closed).toBe(true);
     expect(sockets[0].sent).toHaveLength(0); // 未发出任何帧(含 logout)
+  });
+
+  test('close() 在 CONNECTING 阶段不向用户 error handler 派发噪音', () => {
+    const { client, sockets } = makeClient();
+    const onError = jest.fn();
+    client.on('error', onError);
+    client.run();
+    client.close();
+    expect(sockets[0].closed).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  test('第一条连接尚未建立时重复 run() 不崩溃(ws 会对未建立连接的 close emit error)', () => {
+    const { client, sockets } = makeClient();
+    client.run(); // socket0 停在 CONNECTING
+    expect(() => client.run()).not.toThrow();
+    expect(sockets[0].closed).toBe(true);
+    expect(sockets).toHaveLength(2);
+    client.close();
   });
 
   test('close() 在 OPEN 阶段发送 logout 并触发 disconnect', () => {
