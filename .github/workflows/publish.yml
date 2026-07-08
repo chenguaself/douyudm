@@ -15,10 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 不配 registry-url：它写入的 .npmrc 引用 NODE_AUTH_TOKEN，
+      # Trusted Publishing (OIDC) 免 token，npm >=11.5.1 自动走 id-token 交换
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
 
       - uses: pnpm/action-setup@v4
         with:
@@ -46,5 +47,3 @@ jobs:
 
       - name: Publish
         run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

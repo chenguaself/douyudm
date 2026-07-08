@@ -83,7 +83,8 @@ git push origin v3.x.x       # 触发 .github/workflows/publish.yml
 CI 会用 `jq` 把版本号写回 `package.json` 并提交回 master，**本地 master 需 `git pull --rebase origin master` 后才能继续推**。
 
 注意点：
-- npm token 类型必须是 **Automation**，否则 `EOTP` 失败
+- npm 发布走 **Trusted Publishing (OIDC)**，无 token（2026-07 起；此前的 granular token 90 天过期会导致 publish 返回伪装的 E404）。npm 侧配置在 npmjs.com → douyudm → Settings → Trusted Publisher（GitHub Actions / flxxyz / douyudm / publish.yml）
+- CI 的 pnpm 锁大版本 10、Node 24，与本地一致；pnpm `latest` 曾因 pnpm 11 要求 Node≥22.13 炸过流水线
 - 用 `jq` 而不是 `npm version`，避免版本号未变时 `Version not changed` 错误
 - `examples/browser/` 通过 `static.yml` 自动部署到 GitHub Pages
 
