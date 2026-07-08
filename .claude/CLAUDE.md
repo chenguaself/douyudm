@@ -59,6 +59,9 @@ Node v21+ 内置 WebSocket（undici），会误判。必须用 `process.versions
 ### 8. Jest 配置用 `.js` 不是 `.ts`
 `jest.config.js` 故意写成 JS，避免引入 `ts-node` 依赖。
 
+### 9. 传递依赖的安全升级用 `pnpm.overrides`，别删 lockfile
+pnpm 10 的 `pnpm update --depth Infinity` 碰不到深层传递依赖。删 lockfile 全量重解析需要经本地代理重拉全部 registry 元数据，可能卡 30 分钟以上。正确做法：在 `package.json` 的 `pnpm.overrides` 加版本下限，`pnpm install` 分钟级生效。
+
 ## 协议要点
 
 - **Packet header**：12 字节（`uint32 len` ×2 小端 + `int16 typeCode=689` + `int16 占位=0`）。body 末尾追加 `\0`。
@@ -86,12 +89,8 @@ CI 会用 `jq` 把版本号写回 `package.json` 并提交回 master，**本地 
 ## 依赖与外部约束
 
 - 运行时：`ws` (Node) + `commander` (CLI)。两者都是 Rollup 的 `external`，不打进库。
+- `package.json` 的 `pnpm.overrides` 是安全版本下限（2026-07 修 Dependabot 告警加的）。`serialize-javascript` 的必须保留（`@rollup/plugin-terser` 锁 `^6`，需强制跨大版本）；其余几个是范围内下限，依赖自然升级超过后可删。
 - 浏览器构建：`platform/browser.ts` → IIFE，全局变量名 **`douyudm`（小写）**。
 - TS target ES2019，lib `["ES2019","DOM"]`，strict mode。
 - `dist/` 和 `coverage/` 在 `.gitignore`。
 - `data/*.json` 是历史礼物 ID 表和镜像地址，当前代码未使用，仅作参考。
-
-## 与已有 memory 的关系
-
-- `.claude/memory/project_overview.md` — 部分过时（v2.1.1/JS/lowdb 描述），需以代码和本文件为准
-- `.claude/memory/refactor_ts_rollup.md` — v3.0.0 重构方案，仍准确，可作架构参考
