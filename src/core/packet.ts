@@ -44,17 +44,22 @@ export class Packet {
 
   static decode(buf: ArrayBuffer | ArrayBufferView, callback: PacketDecodeCallback): void {
     const decoder = new TextDecoder();
-    let buffer: ArrayBuffer = toArrayBuffer(buf);
+    const buffer: ArrayBuffer = toArrayBuffer(buf);
+    const view = new DataView(buffer);
+    let offset = 0;
 
-    while (buffer.byteLength > 0) {
-      if (buffer.byteLength < 4) return;
-      const readLength = new DataView(buffer).getUint32(0, true);
-      buffer = buffer.slice(4);
+    while (offset + HEADER_LEN_SIZE <= buffer.byteLength) {
+      const readLength = view.getUint32(offset, true);
+      offset += HEADER_LEN_SIZE;
 
-      if (buffer.byteLength < readLength) return;
+      // 畸形帧（长度装不下 8 字节头部余量 + \0 结尾）或截断帧：丢弃剩余部分
+      if (readLength < HEADER_LEN_TOTAL - HEADER_LEN_SIZE + 1) return;
+      if (offset + readLength > buffer.byteLength) return;
 
-      const message = decoder.decode(buffer.slice(8, readLength - 1));
-      buffer = buffer.slice(readLength);
+      const bodyStart = offset + (HEADER_LEN_TOTAL - HEADER_LEN_SIZE);
+      const bodyLength = readLength - (HEADER_LEN_TOTAL - HEADER_LEN_SIZE) - 1;
+      const message = decoder.decode(new Uint8Array(buffer, bodyStart, bodyLength));
+      offset += readLength;
       callback(message);
     }
   }

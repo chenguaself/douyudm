@@ -39,6 +39,8 @@ export interface ClientOptions {
 // ─── WebSocket Abstraction ────────────────────────────────────────────────────
 
 export interface IWebSocket {
+  /** 0=CONNECTING 1=OPEN 2=CLOSING 3=CLOSED；可选以兼容自定义 factory，缺省视为 OPEN */
+  readyState?: number;
   send(data: ArrayBuffer | Uint8Array): void;
   close(): void;
   onopen: ((event: unknown) => void) | null;

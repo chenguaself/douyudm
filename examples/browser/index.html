@@ -14,9 +14,9 @@
   <div id="root"></div>
 
   <script src="https://unpkg.com/douyudm/dist/douyudm.browser.min.js"></script>
-  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.7/babel.min.js" integrity="sha384-ezQ6HS3FLspd9te19o2McUV6FAK091+GG7KO54f/R8DKgCDi7fULhapNrd5LY+vG" crossorigin="anonymous"></script>
 
   <script type="text/babel">
     const { useState, useRef, useEffect } = React
@@ -98,6 +98,10 @@
       const ignoredRef = useRef(ignored)
       ignoredRef.current = ignored
 
+      // 封顶 200 条，长时间挂机不撑爆内存
+      const MAX_MESSAGES = 200
+      const pushMsg = (msg) => setMessages(prev => [...prev.slice(-(MAX_MESSAGES - 1)), { id: nextId(), ...msg }])
+
       const connectRef = useRef(null)
       connectRef.current = () => {
         if (!roomId.trim() || clientRef.current) return
@@ -116,28 +120,28 @@
 
         client.on('error', (c, err) => {
           setStatus('disconnected')
-          setMessages(prev => [...prev, { id: nextId(), type: 'error', text: err.message }])
+          pushMsg({ type: 'error', text: err.message })
           clientRef.current = null
         })
 
         client.on('chatmsg', (res) => {
           if (ignoredRef.current.has('chatmsg')) return
-          setMessages(prev => [...prev, { id: nextId(), type: 'chat', nn: res.nn, level: res.level, txt: res.txt }])
+          pushMsg({ type: 'chat', nn: res.nn, level: res.level, txt: res.txt })
         })
 
         client.on('uenter', (res) => {
           if (ignoredRef.current.has('uenter')) return
-          setMessages(prev => [...prev, { id: nextId(), type: 'enter', nn: res.nn }])
+          pushMsg({ type: 'enter', nn: res.nn })
         })
 
         client.on('gdp', (res) => {
           if (ignoredRef.current.has('gdp')) return
-          setMessages(prev => [...prev, { id: nextId(), type: 'gift', nn: res.nn, gfn: res.gfn, gfcnt: res.gfcnt }])
+          pushMsg({ type: 'gift', nn: res.nn, gfn: res.gfn, gfcnt: res.gfcnt })
         })
 
         client.on('spbc', (res) => {
           if (ignoredRef.current.has('spbc')) return
-          setMessages(prev => [...prev, { id: nextId(), type: 'spbc', sn: res.sn, gn: res.gn, gc: res.gc }])
+          pushMsg({ type: 'spbc', sn: res.sn, gn: res.gn, gc: res.gc })
         })
 
         client.run()

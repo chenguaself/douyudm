@@ -37,7 +37,14 @@ export class STT {
           const idx = s.indexOf('@=');
           const k = s.slice(0, idx);
           const v = s.slice(idx + 2);
-          o[k] = v ? STT.deserialize(v) : '';
+          // defineProperty 而不是 o[k]=v：服务端可控的 k 为 "__proto__" 时
+          // 直接赋值会改写对象原型，defineProperty 始终创建自有属性
+          Object.defineProperty(o, k, {
+            value: v ? STT.deserialize(v) : '',
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
           return o;
         }, {});
     }

@@ -49,6 +49,8 @@ function randomPort(): number {
   return DANMU_PORTS[Math.floor(Math.random() * DANMU_PORTS.length)];
 }
 
+const WS_OPEN = 1;
+
 export class Client implements IClient {
   readonly roomId: string | number;
 
@@ -56,7 +58,7 @@ export class Client implements IClient {
   private _heartbeatTask: ReturnType<typeof setInterval> | null = null;
   private _ignore: Set<MessageEventType>;
   private _wsFactory: WebSocketFactory;
-  private _clientEvents: Record<ClientEventName, ClientEventHandler>;
+  private _userEvents: Record<ClientEventName, ClientEventHandler[]>;
   private _messageEvents: MessageEventMap;
 
   constructor(
@@ -67,19 +69,7 @@ export class Client implements IClient {
     this.roomId = roomId;
     this._ignore = new Set(opts.ignore ?? []);
     this._wsFactory = wsFactory ?? defaultWsFactory;
-    this._clientEvents = {
-      connect: (_client) => {
-        this._login();
-        this._joinGroup();
-        this._heartbeat();
-      },
-      disconnect: (_client) => {
-        this._logout();
-      },
-      error: (_client, err) => {
-        console.error(err);
-      },
-    };
+    this._userEvents = { connect: [], disconnect: [], error: [] };
     this._messageEvents = createDefaultMessageEvents();
   }
 
@@ -87,14 +77,7 @@ export class Client implements IClient {
   on(event: MessageEventType, cb: MessageHandler): this;
   on(event: ClientEventName | MessageEventType, cb: ClientEventHandler | MessageHandler): this {
     if (event === 'connect' || event === 'disconnect' || event === 'error') {
-      const prev = this._clientEvents[event as ClientEventName];
-      const next = cb as ClientEventHandler;
-      this._clientEvents[event as ClientEventName] = (client, err) => {
-        if (event === 'connect' || event === 'disconnect') {
-          prev(client, err);
-        }
-        next(client, err);
-      };
+      this._userEvents[event].push(cb as ClientEventHandler);
     } else {
       this._messageEvents[event as MessageEventType] = cb as MessageHandler;
     }
@@ -102,26 +85,47 @@ export class Client implements IClient {
   }
 
   run(url?: string): void {
+    // 重复 run()：先拆掉旧连接，避免泄漏和旧 socket 事件串扰
+    if (this._ws) {
+      const old = this._ws;
+      this._ws = null;
+      old.onopen = old.onerror = old.onclose = old.onmessage = null;
+      old.close();
+    }
+    if (this._heartbeatTask !== null) {
+      clearInterval(this._heartbeatTask);
+      this._heartbeatTask = null;
+    }
+
     const port = randomPort();
     const wsUrl = url ?? `wss://danmuproxy.douyu.com:${port}/`;
-    this._ws = this._wsFactory(wsUrl);
+    const ws = this._wsFactory(wsUrl);
+    this._ws = ws;
 
-    this._ws.onopen = () => {
-      this._clientEvents.connect(this);
+    // 所有 handler 校验 socket 仍是当前代际，过期事件一律丢弃
+    ws.onopen = () => {
+      if (this._ws === ws) this._emit('connect');
     };
 
-    this._ws.onerror = (event) => {
-      this._clientEvents.error(this, event instanceof Error ? event : new Error(String(event)));
+    ws.onerror = (event) => {
+      if (this._ws === ws) {
+        this._emit('error', event instanceof Error ? event : new Error(String(event)));
+      }
     };
 
-    this._ws.onclose = () => {
-      this._clientEvents.disconnect(this);
+    ws.onclose = () => {
+      if (this._ws !== ws) return;
+      this._ws = null;
+      this._emit('disconnect');
     };
 
-    this._ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
+      if (this._ws !== ws) return;
       const data = event.data;
       if (data instanceof Blob) {
-        data.arrayBuffer().then((buf) => this._messageHandle(buf));
+        data.arrayBuffer().then((buf) => {
+          if (this._ws === ws) this._messageHandle(buf);
+        });
       } else {
         this._messageHandle(data as ArrayBuffer);
       }
@@ -136,8 +140,27 @@ export class Client implements IClient {
   close(): void {
     this._logout();
     if (this._ws) {
+      // 不立刻置空：close 帧完成后 onclose 里统一清理并触发 disconnect
       this._ws.close();
-      this._ws = null;
+    }
+  }
+
+  private _emit(event: ClientEventName, err?: Error): void {
+    if (event === 'connect') {
+      this._login();
+      this._joinGroup();
+      this._heartbeat();
+    } else if (event === 'disconnect') {
+      this._logout();
+    }
+
+    const handlers = this._userEvents[event];
+    if (event === 'error' && handlers.length === 0) {
+      console.error(err);
+      return;
+    }
+    for (const handler of handlers) {
+      handler(this, err);
     }
   }
 
@@ -150,13 +173,18 @@ export class Client implements IClient {
   }
 
   private _heartbeat(): void {
+    if (this._heartbeatTask !== null) clearInterval(this._heartbeatTask);
     this._heartbeatTask = setInterval(() => {
-      this.send({ type: 'mrkl' });
+      // socket 非 OPEN 时跳过（连接切换/关闭的窗口期，send 会抛异常）
+      if (this._ws && (this._ws.readyState === undefined || this._ws.readyState === WS_OPEN)) {
+        this.send({ type: 'mrkl' });
+      }
     }, HEARTBEAT_INTERVAL * 1000);
   }
 
   private _logout(): void {
-    if (this._ws) {
+    // readyState 缺省（自定义 factory 未实现）视为 OPEN；CONNECTING/CLOSING/CLOSED 时发 send 会抛异常
+    if (this._ws && (this._ws.readyState === undefined || this._ws.readyState === WS_OPEN)) {
       this.send({ type: 'logout' });
     }
     if (this._heartbeatTask !== null) {
