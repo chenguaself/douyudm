@@ -56,8 +56,13 @@ function defaultWsFactory(url: string): IWebSocket {
 
 export const DANMU_PORTS = [8501, 8502, 8503, 8504, 8505, 8506];
 
-function randomPort(): number {
-  return DANMU_PORTS[Math.floor(Math.random() * DANMU_PORTS.length)];
+function shuffledPorts(): number[] {
+  const ports = [...DANMU_PORTS];
+  for (let i = ports.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [ports[i], ports[j]] = [ports[j], ports[i]];
+  }
+  return ports;
 }
 
 const WS_CONNECTING = 0;
@@ -83,6 +88,13 @@ export class Client implements IClient {
   private _wsFactory: WebSocketFactory;
   private _userEvents: Record<ClientEventName, ClientEventHandler[]>;
   private _messageEvents: MessageEventMap;
+  private _retries: number;
+  private _retryDelay: number;
+  private _retriesLeft = 0;
+  private _retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private _portQueue: number[] = [];
+  private _lastPort = 0;
+  private _customUrl?: string;
 
   constructor(
     roomId: string | number,
@@ -91,6 +103,8 @@ export class Client implements IClient {
   ) {
     this.roomId = roomId;
     this._ignore = new Set(opts.ignore ?? []);
+    this._retries = opts.retries ?? 5;
+    this._retryDelay = opts.retryDelay ?? 1000;
     this._wsFactory = wsFactory ?? defaultWsFactory;
     this._userEvents = { connect: [], disconnect: [], error: [] };
     this._messageEvents = createDefaultMessageEvents();
@@ -108,7 +122,15 @@ export class Client implements IClient {
   }
 
   run(url?: string): void {
-    // 重复 run()：先拆掉旧连接，避免泄漏和旧 socket 事件串扰
+    this._cancelRetry();
+    this._customUrl = url;
+    this._retriesLeft = this._retries;
+    this._portQueue = [];
+    this._connect();
+  }
+
+  private _connect(): void {
+    // 重复连接：先拆掉旧连接，避免泄漏和旧 socket 事件串扰
     if (this._ws) {
       this._teardown(this._ws);
       this._ws = null;
@@ -118,24 +140,31 @@ export class Client implements IClient {
       this._heartbeatTask = null;
     }
 
-    const port = randomPort();
-    const wsUrl = url ?? `wss://danmuproxy.douyu.com:${port}/`;
+    const wsUrl = this._customUrl ?? `wss://danmuproxy.douyu.com:${this._nextPort()}/`;
     const ws = this._wsFactory(wsUrl);
     this._ws = ws;
+    let opened = false;
 
-    // 所有 handler 校验 socket 仍是当前代际，过期事件一律丢弃
+    // 每个回调先检查触发事件的 socket 还是不是当前这个（this._ws === ws），
+    // 不是就忽略——换连接后旧 socket 迟到的事件不会串进来
     ws.onopen = () => {
-      if (this._ws === ws) this._emit('connect');
+      if (this._ws !== ws) return;
+      opened = true;
+      this._emit('connect');
     };
 
+    // 建连前失败（斗鱼部分端口对部分网络直接 RST）：静默换端口重试，
+    // 耗尽后才向用户 emit。建连后的错误/断开不重试（断线重连不在此 feature 范围）。
     ws.onerror = (event) => {
-      if (this._ws === ws) {
-        this._emit('error', toError(event));
-      }
+      if (this._ws !== ws) return;
+      if (!opened && this._scheduleRetry(ws)) return;
+      this._emit('error', toError(event));
     };
 
     ws.onclose = () => {
       if (this._ws !== ws) return;
+      // RST 可能只触发 close 不触发 error，同样走重试
+      if (!opened && this._scheduleRetry(ws)) return;
       this._ws = null;
       this._emit('disconnect');
     };
@@ -153,12 +182,49 @@ export class Client implements IClient {
     };
   }
 
+  /** 还有剩余次数就关掉失败的 socket、定时发起下一次连接，返回 true（调用方不向用户报错）。
+   *  _ws 置 null 后，这个 socket 后续再触发的 error/close 会因"不是当前 socket"被忽略，
+   *  所以一次失败即使先后触发 error 和 close，也只消耗一次重试机会 */
+  private _scheduleRetry(ws: IWebSocket): boolean {
+    if (this._retriesLeft <= 0) return false;
+    this._retriesLeft--;
+    this._teardown(ws);
+    this._ws = null;
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null;
+      this._connect();
+    }, this._retryDelay);
+    return true;
+  }
+
+  private _cancelRetry(): void {
+    if (this._retryTimer !== null) {
+      clearTimeout(this._retryTimer);
+      this._retryTimer = null;
+    }
+  }
+
+  /** 按随机排好的顺序取端口，一轮内不重复；6 个都用过就重排一轮，
+   *  新一轮的第一个不取刚失败的那个 */
+  private _nextPort(): number {
+    if (this._portQueue.length === 0) {
+      this._portQueue = shuffledPorts();
+      if (this._portQueue[0] === this._lastPort) {
+        this._portQueue.push(this._portQueue.shift() as number);
+      }
+    }
+    const port = this._portQueue.shift() as number;
+    this._lastPort = port;
+    return port;
+  }
+
   send(message: STTObject): void {
     if (!this._ws) throw new Error('Not connected');
     this._ws.send(Packet.encode(STT.serialize(message)));
   }
 
   close(): void {
+    this._cancelRetry();
     this._logout();
     const ws = this._ws;
     if (!ws) return;

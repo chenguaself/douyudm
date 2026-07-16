@@ -25,16 +25,16 @@ core 层不碰 fs/net，浏览器可用；类型进 `src/types/index.ts`；从 `
 
 - 文件第 1 行为 meta：`{"__meta":"douyudm-record","version":1,"rid":"9999","startedAt":<epoch ms>}`
 - 之后每行一条消息：`{"ts":<epoch ms>, ...完整 STT 对象}`（`ts` 为收到时刻）
-- append-only，崩溃安全；解析时坏行跳过并计数，不中断。
+- 只往文件末尾追加、不回头改写，程序中途崩溃最多损失正在写的最后一行；解析时无法解析的行跳过并计数，不中断。
 
-## convert 时间模型
+## convert 时间换算
 
-- 字幕 0 点 = meta `startedAt`（即录制开始）；`--delay <秒>`（可负）整体平移。
-- `--from`/`--to` 裁剪，接受 `HH:MM:SS(.mmm)`、`MM:SS`、纯秒数。
+- 字幕时间轴的第 0 秒 = meta 的 `startedAt`（录制开始那一刻）；`--delay <秒>`（可为负）把全部字幕整体提前或推后。
+- `--from`/`--to` 只保留这段时间内的弹幕，接受 `HH:MM:SS(.mmm)`、`MM:SS`、纯秒数。
 
-## 过滤管线（convert 时执行，原始录制永远完整）
+## 过滤（convert 时执行，原始录制文件永远完整）
 
-顺序：`--filter`（正则匹配 txt，可重复，支持 `/pattern/flags` 写法）→ `--filter-user`（正则匹配 nn）→ `--filter-script <path>`。
+按以下顺序依次过滤：`--filter`（正则匹配弹幕内容 txt，可重复，支持 `/pattern/flags` 写法）→ `--filter-user`（正则匹配昵称 nn）→ `--filter-script <path>`。
 
 filter-script 为 ESM/CJS 模块，default export 二选一：
 - `(msg: RecordedMessage) => boolean | Promise<boolean>` — 逐条，true 保留
@@ -42,7 +42,7 @@ filter-script 为 ESM/CJS 模块，default export 二选一：
 
 ## 滚动轨道分配（layout.ts）
 
-danmaku2ass 风格：屏幕按行高分轨；弹幕从右向左匀速，`duration` 固定（默认 12s）；新弹幕挑第一条满足"前一条已完全离开右边缘，且在其消失前追不上"的轨道，全忙则挑最早空闲的轨（允许重叠，不丢弃）。宽度估算：CJK 记 1 em、ASCII 记 0.5 em × fontSize。
+做法和 danmaku2ass 相同。屏幕按字号高度分成若干行（轨道），每条弹幕从右向左匀速滚动，滚完一条用固定的 `duration` 秒（默认 12s）。新弹幕放进第一条"不会和前一条撞上"的轨道，判断标准两条：前一条的尾巴已经完全滚进屏幕（新弹幕出现时不会叠在它尾巴上），并且新弹幕更快也追不上它。所有轨道都撞就放进最早腾出来的那条——宁可视觉上重叠，也不丢弃弹幕。文字宽度按"汉字等全角算 1 个字号宽、字母数字算半个"估算。
 
 ## ASS 输出
 
@@ -57,4 +57,4 @@ douyudm convert <input.jsonl> [-o out.ass] [--from/--to/--delay]
                 [--width/--height/--fontsize/--duration/--opacity]
 ```
 
-实现要点：`-i` 从 `requiredOption` 降为 program 级普通 option + 默认 action 内手动校验（否则 `douyudm convert` 会因缺 `-i` 报错）；录制时 SIGINT 先 flush 再退出。
+实现要点：`-i` 不能再声明成 commander 的 `requiredOption`（否则运行 `douyudm convert` 也会因为缺 `-i` 报错），改为普通 option，在默认命令的处理函数里自己检查、缺了报和旧版一样的错误文案；录制时按 Ctrl+C 先把缓冲区数据写完再退出，不丢尾部弹幕。

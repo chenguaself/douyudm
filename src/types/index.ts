@@ -34,6 +34,10 @@ export type ClientEventHandler = (client: IClient, err?: Error) => void;
 
 export interface ClientOptions {
   ignore?: MessageEventType[];
+  /** 连接建立前失败的最大重试次数（自动轮换弹幕端口），0 关闭重试。默认 5 */
+  retries?: number;
+  /** 相邻两次连接尝试的间隔 ms。默认 1000 */
+  retryDelay?: number;
 }
 
 // ─── WebSocket Abstraction ────────────────────────────────────────────────────

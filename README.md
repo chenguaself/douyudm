@@ -68,7 +68,7 @@ douyudm convert live.jsonl --filter-script ./my-filter.mjs
 douyudm convert live.jsonl --width 1280 --height 720 --fontsize 36 --duration 8 --opacity 0.6
 ```
 
-录制文件为 JSONL：首行 meta（房间号、开始时刻），之后每行一条消息（`ts` + 原始字段），append-only 崩溃安全。过滤只在 convert 时生效，原始录制永远完整。过滤脚本示例见 [examples/filter-scripts/](examples/filter-scripts/)。
+录制文件为 JSONL 格式：第一行记录房间号和开始时刻，之后每行一条消息（收到时刻 `ts` + 消息原始字段）。文件只追加不改写，中途崩溃最多丢正在写的一行。过滤只在 convert 时生效，原始录制文件不会被改动，可以反复用不同条件重新导出。过滤脚本示例见 [examples/filter-scripts/](examples/filter-scripts/)。
 
 ## API 使用
 
@@ -122,6 +122,10 @@ new Client(roomId, opts?)
 |------|------|--------|------|
 | `roomId` | `string \| number` | — | 房间号 |
 | `opts.ignore` | `string[]` | `[]` | 忽略的消息事件列表 |
+| `opts.retries` | `number` | `5` | 连接建立前失败的最大重试次数（自动轮换 6 个弹幕端口），`0` 关闭 |
+| `opts.retryDelay` | `number` | `1000` | 相邻两次连接尝试的间隔（ms） |
+
+斗鱼的 6 个弹幕端口在部分网络下不是每个都能连上。连接建立**之前**失败时会自动换一个端口重试，重试过程中不触发 `error` 事件，次数全部用完还连不上才触发。连接建立**之后**的断开不会自动重连。
 
 ## 事件列表
 

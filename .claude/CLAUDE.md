@@ -55,8 +55,8 @@ Node v21+ 内置 WebSocket（undici），会误判。必须用 `process.versions
 ### 6. `close()` 必须显式调用
 仅置空 `_ws` 引用不会关闭连接。`close()` 内部会发送 `logout`、清理心跳、关闭 socket。
 
-### 7. WS 端口随机选
-`run()` 每次从 `[8501..8506]` 随机选一个，URL 是 `wss://danmuproxy.douyu.com:<port>/`。可传自定义 url 覆盖。
+### 7. 连接失败会自动换端口重试
+`run()` 把 6 个弹幕端口 `[8501..8506]` 随机排序逐个尝试（URL `wss://danmuproxy.douyu.com:<port>/`）。连接建立**之前**失败会自动换下一个端口重试（默认 5 次、间隔 1s，`opts.retries` / `opts.retryDelay` 可调），重试期间不触发 `error` 事件，次数用完才触发。连接建立**之后**断开不会自动重连（断线重连是独立 feature，未做）。由来：部分网络下约一半端口的连接会被直接重置，详见 `llmdoc/feat-port-retry.md`。`run(url)` 传自定义地址时重试不换地址。
 
 ### 8. Jest 配置用 `.js` 不是 `.ts`
 `jest.config.js` 故意写成 JS，避免引入 `ts-node` 依赖。
