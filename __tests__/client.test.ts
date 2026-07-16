@@ -2,7 +2,7 @@
  * Client 生命周期回归测试(2026-07 审查修复 1/2/5),使用 mock WebSocketFactory,无真实网络。
  */
 import { Client, Packet, STT } from '../src/index';
-import type { IWebSocket, STTObject } from '../src/types';
+import type { ClientOptions, IWebSocket, STTObject } from '../src/types';
 
 class MockWS implements IWebSocket {
   readyState = 0; // CONNECTING
@@ -47,14 +47,16 @@ class MockWS implements IWebSocket {
   }
 }
 
-function makeClient(): { client: Client; sockets: MockWS[] } {
+function makeClient(opts: ClientOptions = {}): { client: Client; sockets: MockWS[]; urls: string[] } {
   const sockets: MockWS[] = [];
-  const client = new Client(9999, {}, () => {
+  const urls: string[] = [];
+  const client = new Client(9999, opts, (url) => {
+    urls.push(url);
     const ws = new MockWS();
     sockets.push(ws);
     return ws;
   });
-  return { client, sockets };
+  return { client, sockets, urls };
 }
 
 describe('Client 生命周期', () => {
@@ -158,10 +160,12 @@ describe('Client 生命周期', () => {
     const h2 = jest.fn();
     client.on('error', h1).on('error', h2);
     client.run();
+    sockets[0].open(); // 建连后的错误直接派发（建连前的会走端口重试）
     sockets[0].onerror?.(new Error('boom'));
     expect(h1).toHaveBeenCalledTimes(1);
     expect(h2).toHaveBeenCalledTimes(1);
     expect(h1.mock.calls[0][1]?.message).toBe('boom');
+    client.close();
   });
 
   test('多个 connect handler 全部触发且内建登录流程照常', () => {
@@ -181,9 +185,11 @@ describe('Client 生命周期', () => {
     const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
     const { client, sockets } = makeClient();
     client.run();
+    sockets[0].open();
     expect(() => sockets[0].onerror?.(new Error('boom'))).not.toThrow();
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
+    client.close();
   });
 
   test('消息分发:收到 chatmsg 触发注册的 handler', () => {
@@ -197,6 +203,171 @@ describe('Client 生命周期', () => {
     });
     expect(onChat).toHaveBeenCalledTimes(1);
     expect(onChat.mock.calls[0][0]).toMatchObject({ type: 'chatmsg', nn: 'tester', txt: 'hi' });
+    client.close();
+  });
+});
+
+const portOf = (url: string): string => new URL(url).port;
+
+describe('连接失败自动换端口重试', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('建连前 error 静默重试:不向用户派发,换端口重连', () => {
+    const { client, sockets, urls } = makeClient();
+    const onError = jest.fn();
+    client.on('error', onError);
+    client.run();
+    sockets[0].onerror?.(new Error('read ECONNRESET'));
+    expect(onError).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(1); // 重试在 delay 之后
+    jest.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(2);
+    expect(portOf(urls[1])).not.toBe(portOf(urls[0]));
+    sockets[1].open(); // 重试成功,登录流程照常
+    expect(sockets[1].sentTypes()).toEqual(['loginreq', 'joingroup']);
+    expect(onError).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  test('建连前 close(RST 不触发 error 只触发 close)同样重试,且不派发 disconnect', () => {
+    const { client, sockets } = makeClient();
+    const onDisconnect = jest.fn();
+    client.on('disconnect', onDisconnect);
+    client.run();
+    sockets[0].readyState = 3;
+    sockets[0].onclose?.({});
+    expect(onDisconnect).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(2);
+    client.close();
+  });
+
+  test('同一失败 socket 的 error+close 只消耗一次重试', () => {
+    const { client, sockets } = makeClient({ retries: 2 });
+    client.run();
+    sockets[0].onerror?.(new Error('rst'));
+    sockets[0].onclose?.({}); // 已不是当前 socket,该事件被忽略,不额外消耗次数
+    jest.advanceTimersByTime(1000);
+    sockets[1].onerror?.(new Error('rst'));
+    jest.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(3); // 1 初始 + 2 重试,恰好耗尽
+    client.close();
+  });
+
+  test('重试耗尽后向用户 emit error 一次', () => {
+    const { client, sockets } = makeClient({ retries: 1 });
+    const onError = jest.fn();
+    client.on('error', onError);
+    client.run();
+    sockets[0].onerror?.(new Error('rst-1'));
+    jest.advanceTimersByTime(1000);
+    sockets[1].onerror?.(new Error('rst-final'));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][1]?.message).toBe('rst-final');
+    jest.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(2); // 不再重试
+  });
+
+  test('retries: 0 关闭重试,保持旧行为立即派发', () => {
+    const { client, sockets } = makeClient({ retries: 0 });
+    const onError = jest.fn();
+    client.on('error', onError);
+    client.run();
+    sockets[0].onerror?.(new Error('rst'));
+    expect(onError).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(1);
+  });
+
+  test('重试等待期间 close() 取消挂起重试且不派发事件', () => {
+    const { client, sockets } = makeClient();
+    const onError = jest.fn();
+    const onDisconnect = jest.fn();
+    client.on('error', onError).on('disconnect', onDisconnect);
+    client.run();
+    sockets[0].onerror?.(new Error('rst'));
+    client.close();
+    jest.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(onDisconnect).not.toHaveBeenCalled();
+  });
+
+  test('重试等待期间再次 run() 取消旧重试并重置重试次数', () => {
+    const { client, sockets } = makeClient({ retries: 1 });
+    client.run();
+    sockets[0].onerror?.(new Error('rst'));
+    client.run(); // 立即重连,旧挂起重试作废
+    expect(sockets).toHaveLength(2);
+    jest.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(2);
+    sockets[1].onerror?.(new Error('rst')); // 次数已重置,仍可重试
+    jest.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(3);
+    client.close();
+  });
+
+  test('连接建立后的 error/close 不触发重试(断线重连不在范围)', () => {
+    const { client, sockets } = makeClient();
+    const onDisconnect = jest.fn();
+    client.on('disconnect', onDisconnect);
+    client.run();
+    sockets[0].open();
+    sockets[0].close(); // 服务端断开
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(1);
+  });
+
+  test('一轮重试内端口不重复,6 个端口各试一次', () => {
+    const { client, sockets, urls } = makeClient();
+    client.run();
+    for (let i = 0; i < 5; i++) {
+      sockets[i].onerror?.(new Error('rst'));
+      jest.advanceTimersByTime(1000);
+    }
+    expect(sockets).toHaveLength(6);
+    expect(new Set(urls.map(portOf)).size).toBe(6);
+    client.close();
+  });
+
+  test('超过一轮后重新洗牌,且不紧接着重试刚失败的端口', () => {
+    const { client, sockets, urls } = makeClient({ retries: 11 });
+    client.run();
+    for (let i = 0; i < 11; i++) {
+      sockets[i].onerror?.(new Error('rst'));
+      jest.advanceTimersByTime(1000);
+    }
+    expect(sockets).toHaveLength(12);
+    expect(portOf(urls[6])).not.toBe(portOf(urls[5])); // 第二轮首个 ≠ 第一轮末个
+    client.close();
+  });
+
+  test('自定义 url 重试沿用同一地址,不换端口', () => {
+    const { client, sockets, urls } = makeClient({ retries: 2 });
+    client.run('wss://my-proxy.example.com:9000/');
+    sockets[0].onerror?.(new Error('rst'));
+    jest.advanceTimersByTime(1000);
+    expect(urls).toEqual([
+      'wss://my-proxy.example.com:9000/',
+      'wss://my-proxy.example.com:9000/',
+    ]);
+    client.close();
+  });
+
+  test('retryDelay 可配置', () => {
+    const { client, sockets } = makeClient({ retryDelay: 5000 });
+    client.run();
+    sockets[0].onerror?.(new Error('rst'));
+    jest.advanceTimersByTime(4999);
+    expect(sockets).toHaveLength(1);
+    jest.advanceTimersByTime(1);
+    expect(sockets).toHaveLength(2);
     client.close();
   });
 });

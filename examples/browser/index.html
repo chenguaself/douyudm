@@ -32,6 +32,140 @@
       }
     }
 
+    // 录制/转换需要 douyudm ≥ 3.2（CDN 拉到旧版本时隐藏对应功能）
+    const DANMAKU_READY = typeof douyudm.parseRecord === 'function' && typeof douyudm.renderAss === 'function'
+    // 录制还需要浏览器支持 IndexedDB（现代浏览器都有）
+    const RECORD_READY = DANMAKU_READY && typeof indexedDB !== 'undefined'
+
+    const downloadFile = (content, filename, mime) => {
+      const blob = content instanceof Blob ? content : new Blob([content], { type: mime })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(a.href)
+    }
+
+    // ── 录制存储（IndexedDB）────────────────────────────────────────────
+    // 弹幕不放内存里攒（长时间录制会越积越多直到页面被浏览器杀掉），
+    // 而是批量写进浏览器自带的本地数据库 IndexedDB：
+    //   - 内存里只保留一个小缓冲（最多 50 条或 3 秒），写完即清
+    //   - 数据落在本地磁盘，页面刷新/意外关闭后录制仍在，可从"历史录制"找回
+    // 两张表：sessions 存每次录制的信息（房间号、开始时刻、条数），
+    //         messages 存弹幕本体，靠 sessionId 关联
+    const recordDB = {
+      _db: null,
+      open() {
+        if (this._db) return Promise.resolve(this._db)
+        return new Promise((resolve, reject) => {
+          const req = indexedDB.open('douyudm-records', 1)
+          req.onupgradeneeded = () => {
+            const db = req.result
+            db.createObjectStore('sessions', { keyPath: 'id', autoIncrement: true })
+            db.createObjectStore('messages', { keyPath: 'id', autoIncrement: true })
+              .createIndex('sessionId', 'sessionId')
+          }
+          req.onsuccess = () => { this._db = req.result; resolve(this._db) }
+          req.onerror = () => reject(req.error)
+        })
+      },
+      _done(tx) {
+        return new Promise((resolve, reject) => {
+          tx.oncomplete = resolve
+          tx.onerror = tx.onabort = () => reject(tx.error)
+        })
+      },
+      async createSession(rid, startedAt) {
+        const db = await this.open()
+        const tx = db.transaction('sessions', 'readwrite')
+        const req = tx.objectStore('sessions').add({ rid, startedAt, count: 0 })
+        await this._done(tx)
+        return req.result
+      },
+      // 一批消息 + 更新条数，放在同一个事务里写
+      async appendMessages(sessionId, batch, countAfter) {
+        const db = await this.open()
+        const tx = db.transaction(['messages', 'sessions'], 'readwrite')
+        const messages = tx.objectStore('messages')
+        // 消息包一层 { sessionId, msg }，不直接展开：万一消息自带 id 字段会和表主键撞车
+        for (const msg of batch) messages.add({ sessionId, msg })
+        const sessions = tx.objectStore('sessions')
+        sessions.get(sessionId).onsuccess = function () {
+          if (this.result) sessions.put({ ...this.result, count: countAfter })
+        }
+        await this._done(tx)
+      },
+      async listSessions() {
+        const db = await this.open()
+        const tx = db.transaction('sessions', 'readonly')
+        const req = tx.objectStore('sessions').getAll()
+        await this._done(tx)
+        return req.result.sort((a, b) => b.startedAt - a.startedAt)
+      },
+      // 逐条游标读取并直接序列化成行文本，不把整份录制的对象同时留在内存里
+      async readLines(sessionId) {
+        const db = await this.open()
+        const tx = db.transaction('messages', 'readonly')
+        const index = tx.objectStore('messages').index('sessionId')
+        const parts = []
+        await new Promise((resolve, reject) => {
+          const req = index.openCursor(IDBKeyRange.only(sessionId))
+          req.onsuccess = () => {
+            const cursor = req.result
+            if (!cursor) return resolve()
+            parts.push(douyudm.serializeRecordLine(cursor.value.msg))
+            cursor.continue()
+          }
+          req.onerror = () => reject(req.error)
+        })
+        return parts
+      },
+      async deleteSession(sessionId) {
+        const db = await this.open()
+        const tx = db.transaction(['messages', 'sessions'], 'readwrite')
+        const index = tx.objectStore('messages').index('sessionId')
+        const req = index.openCursor(IDBKeyRange.only(sessionId))
+        req.onsuccess = () => {
+          const cursor = req.result
+          if (cursor) { cursor.delete(); cursor.continue() }
+        }
+        tx.objectStore('sessions').delete(sessionId)
+        await this._done(tx)
+      },
+    }
+
+    // 一次录制：push 进小缓冲，满 50 条或 3 秒批量落库
+    const RECORD_BUFFER_MAX = 50
+    const RECORD_FLUSH_MS = 3000
+
+    async function startRecorder(rid) {
+      const startedAt = Date.now()
+      const sessionId = await recordDB.createSession(rid, startedAt)
+      let buffer = []
+      let timer = null
+      let saved = 0
+      const flush = () => {
+        if (timer) { clearTimeout(timer); timer = null }
+        if (buffer.length === 0) return Promise.resolve()
+        const batch = buffer
+        buffer = []
+        saved += batch.length
+        return recordDB.appendMessages(sessionId, batch, saved)
+      }
+      return {
+        sessionId,
+        rid,
+        startedAt,
+        get count() { return saved + buffer.length },
+        push(msg) {
+          buffer.push(msg)
+          if (buffer.length >= RECORD_BUFFER_MAX) flush()
+          else if (!timer) timer = setTimeout(flush, RECORD_FLUSH_MS)
+        },
+        flush,
+      }
+    }
+
     const FILTER_OPTIONS = [
       { value: 'chatmsg',     label: '弹幕 (chatmsg)' },
       { value: 'uenter',      label: '进入房间 (uenter)' },
@@ -80,6 +214,25 @@
       const clientRef = useRef(null)
       const listRef = useRef(null)
 
+      // 录制：连接期间把 chatmsg 批量写入 IndexedDB（内存只留小缓冲），
+      // 下载为 .jsonl（格式与 CLI --record 相同）。刷新页面后可在"历史录制"里找回
+      const [recordEnabled, setRecordEnabled] = useState(false)
+      const [recordCount, setRecordCount] = useState(0)
+      const [recordSessions, setRecordSessions] = useState([])
+      const recorderRef = useRef(null)
+
+      const refreshSessions = () => {
+        if (RECORD_READY) recordDB.listSessions().then(setRecordSessions).catch(() => {})
+      }
+      useEffect(refreshSessions, [])
+
+      // 转换：JSONL → ASS，纯本地计算，不需要连接
+      const [convertOpen, setConvertOpen] = useState(false)
+      const [convOpts, setConvOpts] = useState({ from: '', to: '', delay: '', filter: '', fontsize: '48', duration: '12' })
+      const [convMsg, setConvMsg] = useState(null)
+      const convFileRef = useRef(null)
+      const setConvOpt = (key, value) => setConvOpts(prev => ({ ...prev, [key]: value }))
+
       useEffect(() => {
         if (listRef.current) {
           listRef.current.scrollTop = listRef.current.scrollHeight
@@ -109,6 +262,14 @@
         setStatus('connecting')
         setMessages([])
 
+        recorderRef.current = null
+        if (RECORD_READY && recordEnabled) {
+          setRecordCount(0)
+          startRecorder(roomId)
+            .then(rec => { recorderRef.current = rec })
+            .catch(e => pushMsg({ type: 'error', text: `录制初始化失败: ${e.message}` }))
+        }
+
         const client = new douyudm.Client(roomId)
 
         client.on('connect', () => setStatus('connected'))
@@ -116,15 +277,23 @@
         client.on('disconnect', () => {
           setStatus('disconnected')
           clientRef.current = null
+          stopRecorderRef.current()
         })
 
         client.on('error', (c, err) => {
           setStatus('disconnected')
           pushMsg({ type: 'error', text: err.message })
           clientRef.current = null
+          stopRecorderRef.current()
         })
 
         client.on('chatmsg', (res) => {
+          // 录制不受屏蔽选项影响：屏蔽只管显示，录下来的数据保持完整
+          const rec = recorderRef.current
+          if (rec) {
+            rec.push({ ...res, ts: Date.now() })
+            setRecordCount(rec.count)
+          }
           if (ignoredRef.current.has('chatmsg')) return
           pushMsg({ type: 'chat', nn: res.nn, level: res.level, txt: res.txt })
         })
@@ -150,12 +319,83 @@
 
       const connect = debounce(() => connectRef.current(), 300)
 
+      // 停止录制：把缓冲里最后几条写进数据库；一条都没录到就删掉这次会话，
+      // 最后刷新历史录制列表。手动断开、服务端断开、出错三条路都走这里
+      const stopRecorder = () => {
+        const rec = recorderRef.current
+        if (!rec) return
+        recorderRef.current = null
+        rec.flush()
+          .then(() => (rec.count === 0 ? recordDB.deleteSession(rec.sessionId) : null))
+          .catch(() => {})
+          .then(refreshSessions)
+      }
+      const stopRecorderRef = useRef(stopRecorder)
+      stopRecorderRef.current = stopRecorder
+
       const disconnect = () => {
         if (clientRef.current) {
           clientRef.current.close()
           clientRef.current = null
         }
+        stopRecorder()
         setStatus('disconnected')
+      }
+
+      // 下载录制：第一行 meta + 每行一条消息，与 CLI 的 --record 输出一致，
+      // 下载后的文件可以直接喂给 douyudm convert 或下方的转换区
+      const downloadSession = async (session) => {
+        try {
+          const lines = await recordDB.readLines(session.id)
+          const meta = douyudm.createRecordMeta(session.rid, session.startedAt)
+          const content = douyudm.serializeRecordLine(meta) + lines.join('')
+          downloadFile(content, `douyudm-${session.rid}-${session.startedAt}.jsonl`, 'application/x-ndjson')
+        } catch (e) {
+          pushMsg({ type: 'error', text: `读取录制失败: ${e.message}` })
+        }
+      }
+
+      // 录制中也能直接下载当前会话：先把缓冲写完再读库
+      const downloadCurrent = async () => {
+        const rec = recorderRef.current
+        if (!rec) return
+        await rec.flush()
+        await downloadSession({ id: rec.sessionId, rid: rec.rid, startedAt: rec.startedAt })
+      }
+
+      const deleteSession = async (sessionId) => {
+        await recordDB.deleteSession(sessionId).catch(() => {})
+        refreshSessions()
+      }
+
+      // JSONL → ASS：与 CLI convert 相同的管线（解析 → 过滤 → 时间换算 → 渲染）
+      const convertFile = async () => {
+        const file = convFileRef.current?.files?.[0]
+        if (!file) { setConvMsg({ ok: false, text: '请先选择 .jsonl 录制文件' }); return }
+        try {
+          const { meta, messages: recorded, badLines } = douyudm.parseRecord(await file.text())
+          const zeroAt = meta?.startedAt ?? recorded[0]?.ts ?? 0
+          const kept = await douyudm.applyFilters(recorded, {
+            text: convOpts.filter.trim() ? [douyudm.compileFilterPattern(convOpts.filter.trim())] : [],
+          })
+          const items = douyudm.toDanmakuItems(kept, {
+            zeroAt,
+            from: convOpts.from.trim() ? douyudm.parseTimeParam(convOpts.from) : undefined,
+            to: convOpts.to.trim() ? douyudm.parseTimeParam(convOpts.to) : undefined,
+            delay: convOpts.delay.trim() ? parseFloat(convOpts.delay) : 0,
+          })
+          const ass = douyudm.renderAss(items, {
+            fontSize: parseInt(convOpts.fontsize, 10) || 48,
+            duration: parseFloat(convOpts.duration) || 12,
+          })
+          downloadFile(ass, file.name.replace(/\.jsonl?$/i, '') + '.ass', 'text/plain')
+          setConvMsg({
+            ok: true,
+            text: `已导出 ${items.length} 条弹幕（读取 ${recorded.length} 条，过滤剔除 ${recorded.length - kept.length} 条${badLines ? `，跳过 ${badLines} 行坏数据` : ''}）`,
+          })
+        } catch (e) {
+          setConvMsg({ ok: false, text: `转换失败: ${e.message}` })
+        }
       }
 
       const isDisconnected = status === 'disconnected'
@@ -208,6 +448,43 @@
             )}
           </div>
 
+          {RECORD_READY && (
+            <div style={{ fontSize: 13, color: '#555', marginBottom: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <label style={{ cursor: isDisconnected ? 'pointer' : 'not-allowed' }}>
+                  <input
+                    type="checkbox"
+                    checked={recordEnabled}
+                    disabled={!isDisconnected}
+                    onChange={e => setRecordEnabled(e.target.checked)}
+                    style={{ marginRight: 4 }}
+                  />
+                  录制弹幕（存入浏览器本地数据库，刷新不丢，下载为 .jsonl）
+                </label>
+                {!isDisconnected && recordEnabled && <>
+                  <span style={{ color: '#888' }}>已录 {recordCount} 条</span>
+                  <button onClick={downloadCurrent} style={{ fontSize: 13, padding: '3px 10px', background: 'none', border: '1px solid #ddd', borderRadius: 4, cursor: 'pointer', color: '#555' }}>
+                    下载
+                  </button>
+                </>}
+              </div>
+              {recordSessions.length > 0 && (
+                <details style={{ marginTop: 6 }}>
+                  <summary style={{ cursor: 'pointer', color: '#888' }}>历史录制（{recordSessions.length}）</summary>
+                  <ul style={{ listStyle: 'none', padding: '4px 0 0 8px', margin: 0 }}>
+                    {recordSessions.map(s => (
+                      <li key={s.id} style={{ padding: '3px 0', display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span>房间 {s.rid} · {new Date(s.startedAt).toLocaleString()} · {s.count} 条</span>
+                        <button onClick={() => downloadSession(s)} style={{ fontSize: 12, padding: '2px 8px', background: 'none', border: '1px solid #ddd', borderRadius: 4, cursor: 'pointer', color: '#555' }}>下载</button>
+                        <button onClick={() => deleteSession(s.id)} style={{ fontSize: 12, padding: '2px 8px', background: 'none', border: '1px solid #ddd', borderRadius: 4, cursor: 'pointer', color: '#c33' }}>删除</button>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          )}
+
           <div style={{ fontSize: 13, color: statusColor[status], marginBottom: 12 }}>
             {statusText[status]}
           </div>
@@ -237,6 +514,39 @@
               </li>
             ))}
           </ul>
+
+          {DANMAKU_READY && (
+            <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid #eee' }}>
+              <button
+                onClick={() => setConvertOpen(v => !v)}
+                style={{ fontSize: 13, color: '#555', background: 'none', border: '1px solid #ddd', borderRadius: 4, padding: '3px 10px', cursor: 'pointer' }}
+              >
+                {convertOpen ? '▲' : '▼'} JSONL → ASS 字幕转换（纯本地，无需连接）
+              </button>
+              {convertOpen && (
+                <div style={{ marginTop: 10, padding: '10px 12px', border: '1px solid #ddd', borderRadius: 4, fontSize: 13, color: '#555' }}>
+                  <div style={{ marginBottom: 8 }}>
+                    选择录制文件（本页下载的或 CLI <code>--record</code> 生成的 .jsonl 都可以）：
+                  </div>
+                  <input type="file" accept=".jsonl,.json,application/x-ndjson" ref={convFileRef} style={{ marginBottom: 10, display: 'block' }} />
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 8, marginBottom: 10 }}>
+                    <label>起始 <input value={convOpts.from} onChange={e => setConvOpt('from', e.target.value)} placeholder="如 10:00，可留空" style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                    <label>结束 <input value={convOpts.to} onChange={e => setConvOpt('to', e.target.value)} placeholder="如 1:30:00，可留空" style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                    <label>延迟秒 <input value={convOpts.delay} onChange={e => setConvOpt('delay', e.target.value)} placeholder="可为负，如 -2.5" style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                    <label>剔除正则 <input value={convOpts.filter} onChange={e => setConvOpt('filter', e.target.value)} placeholder="如 666+" style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                    <label>字号 <input type="number" value={convOpts.fontsize} onChange={e => setConvOpt('fontsize', e.target.value)} style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                    <label>滚动秒数 <input type="number" value={convOpts.duration} onChange={e => setConvOpt('duration', e.target.value)} style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                  </div>
+                  <button onClick={convertFile} style={{ padding: '6px 16px', background: '#f60', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer' }}>
+                    转换并下载 .ass
+                  </button>
+                  {convMsg && (
+                    <div style={{ marginTop: 8, color: convMsg.ok ? '#0a0' : 'red' }}>{convMsg.text}</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )
     }

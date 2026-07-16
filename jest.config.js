@@ -5,7 +5,7 @@ module.exports = {
   testMatch: ['**/__tests__/**/*.test.ts'],
   // *.live.test.ts 是真实网络测试，默认排除；用 pnpm run test:ports 单独跑
   testPathIgnorePatterns: ['/node_modules/', '\\.live\\.test\\.ts$'],
-  collectCoverageFrom: ['src/core/stt.ts', 'src/core/packet.ts'],
+  collectCoverageFrom: ['src/core/stt.ts', 'src/core/packet.ts', 'src/core/danmaku/**/*.ts'],
   coverageThreshold: {
     global: {
       branches: 100,
