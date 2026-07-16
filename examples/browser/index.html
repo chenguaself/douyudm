@@ -32,6 +32,18 @@
       }
     }
 
+    // 录制/转换需要 douyudm ≥ 3.2（CDN 拉到旧版本时隐藏对应功能）
+    const DANMAKU_READY = typeof douyudm.parseRecord === 'function' && typeof douyudm.renderAss === 'function'
+
+    const downloadFile = (content, filename, mime) => {
+      const blob = content instanceof Blob ? content : new Blob([content], { type: mime })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(a.href)
+    }
+
     const FILTER_OPTIONS = [
       { value: 'chatmsg',     label: '弹幕 (chatmsg)' },
       { value: 'uenter',      label: '进入房间 (uenter)' },
@@ -80,6 +92,18 @@
       const clientRef = useRef(null)
       const listRef = useRef(null)
 
+      // 录制：连接期间把 chatmsg 攒在内存里，随时可下载为 .jsonl（格式与 CLI --record 相同）
+      const [recordEnabled, setRecordEnabled] = useState(false)
+      const [recordCount, setRecordCount] = useState(0)
+      const recordingRef = useRef(null)
+
+      // 转换：JSONL → ASS，纯本地计算，不需要连接
+      const [convertOpen, setConvertOpen] = useState(false)
+      const [convOpts, setConvOpts] = useState({ from: '', to: '', delay: '', filter: '', fontsize: '48', duration: '12' })
+      const [convMsg, setConvMsg] = useState(null)
+      const convFileRef = useRef(null)
+      const setConvOpt = (key, value) => setConvOpts(prev => ({ ...prev, [key]: value }))
+
       useEffect(() => {
         if (listRef.current) {
           listRef.current.scrollTop = listRef.current.scrollHeight
@@ -109,6 +133,13 @@
         setStatus('connecting')
         setMessages([])
 
+        if (DANMAKU_READY && recordEnabled) {
+          recordingRef.current = { roomId, startedAt: Date.now(), lines: [] }
+          setRecordCount(0)
+        } else {
+          recordingRef.current = null
+        }
+
         const client = new douyudm.Client(roomId)
 
         client.on('connect', () => setStatus('connected'))
@@ -125,6 +156,12 @@
         })
 
         client.on('chatmsg', (res) => {
+          // 录制不受屏蔽选项影响：屏蔽只管显示，录下来的数据保持完整
+          const rec = recordingRef.current
+          if (rec) {
+            rec.lines.push({ ...res, ts: Date.now() })
+            setRecordCount(rec.lines.length)
+          }
           if (ignoredRef.current.has('chatmsg')) return
           pushMsg({ type: 'chat', nn: res.nn, level: res.level, txt: res.txt })
         })
@@ -156,6 +193,47 @@
           clientRef.current = null
         }
         setStatus('disconnected')
+      }
+
+      // 下载录制：第一行 meta + 每行一条消息，与 CLI 的 --record 输出一致，
+      // 下载后的文件可以直接喂给 douyudm convert 或下方的转换区
+      const downloadRecording = () => {
+        const rec = recordingRef.current
+        if (!rec || rec.lines.length === 0) return
+        const meta = douyudm.createRecordMeta(rec.roomId, rec.startedAt)
+        const content = douyudm.serializeRecordLine(meta) +
+          rec.lines.map(m => douyudm.serializeRecordLine(m)).join('')
+        downloadFile(content, `douyudm-${rec.roomId}-${rec.startedAt}.jsonl`, 'application/x-ndjson')
+      }
+
+      // JSONL → ASS：与 CLI convert 相同的管线（解析 → 过滤 → 时间换算 → 渲染）
+      const convertFile = async () => {
+        const file = convFileRef.current?.files?.[0]
+        if (!file) { setConvMsg({ ok: false, text: '请先选择 .jsonl 录制文件' }); return }
+        try {
+          const { meta, messages: recorded, badLines } = douyudm.parseRecord(await file.text())
+          const zeroAt = meta?.startedAt ?? recorded[0]?.ts ?? 0
+          const kept = await douyudm.applyFilters(recorded, {
+            text: convOpts.filter.trim() ? [douyudm.compileFilterPattern(convOpts.filter.trim())] : [],
+          })
+          const items = douyudm.toDanmakuItems(kept, {
+            zeroAt,
+            from: convOpts.from.trim() ? douyudm.parseTimeParam(convOpts.from) : undefined,
+            to: convOpts.to.trim() ? douyudm.parseTimeParam(convOpts.to) : undefined,
+            delay: convOpts.delay.trim() ? parseFloat(convOpts.delay) : 0,
+          })
+          const ass = douyudm.renderAss(items, {
+            fontSize: parseInt(convOpts.fontsize, 10) || 48,
+            duration: parseFloat(convOpts.duration) || 12,
+          })
+          downloadFile(ass, file.name.replace(/\.jsonl?$/i, '') + '.ass', 'text/plain')
+          setConvMsg({
+            ok: true,
+            text: `已导出 ${items.length} 条弹幕（读取 ${recorded.length} 条，过滤剔除 ${recorded.length - kept.length} 条${badLines ? `，跳过 ${badLines} 行坏数据` : ''}）`,
+          })
+        } catch (e) {
+          setConvMsg({ ok: false, text: `转换失败: ${e.message}` })
+        }
       }
 
       const isDisconnected = status === 'disconnected'
@@ -208,6 +286,27 @@
             )}
           </div>
 
+          {DANMAKU_READY && (
+            <div style={{ fontSize: 13, color: '#555', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <label style={{ cursor: isDisconnected ? 'pointer' : 'not-allowed' }}>
+                <input
+                  type="checkbox"
+                  checked={recordEnabled}
+                  disabled={!isDisconnected}
+                  onChange={e => setRecordEnabled(e.target.checked)}
+                  style={{ marginRight: 4 }}
+                />
+                录制弹幕（连接期间缓存在内存，下载为 .jsonl）
+              </label>
+              {recordCount > 0 && <>
+                <span style={{ color: '#888' }}>已录 {recordCount} 条</span>
+                <button onClick={downloadRecording} style={{ fontSize: 13, padding: '3px 10px', background: 'none', border: '1px solid #ddd', borderRadius: 4, cursor: 'pointer', color: '#555' }}>
+                  下载录制文件
+                </button>
+              </>}
+            </div>
+          )}
+
           <div style={{ fontSize: 13, color: statusColor[status], marginBottom: 12 }}>
             {statusText[status]}
           </div>
@@ -237,6 +336,39 @@
               </li>
             ))}
           </ul>
+
+          {DANMAKU_READY && (
+            <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid #eee' }}>
+              <button
+                onClick={() => setConvertOpen(v => !v)}
+                style={{ fontSize: 13, color: '#555', background: 'none', border: '1px solid #ddd', borderRadius: 4, padding: '3px 10px', cursor: 'pointer' }}
+              >
+                {convertOpen ? '▲' : '▼'} JSONL → ASS 字幕转换（纯本地，无需连接）
+              </button>
+              {convertOpen && (
+                <div style={{ marginTop: 10, padding: '10px 12px', border: '1px solid #ddd', borderRadius: 4, fontSize: 13, color: '#555' }}>
+                  <div style={{ marginBottom: 8 }}>
+                    选择录制文件（本页下载的或 CLI <code>--record</code> 生成的 .jsonl 都可以）：
+                  </div>
+                  <input type="file" accept=".jsonl,.json,application/x-ndjson" ref={convFileRef} style={{ marginBottom: 10, display: 'block' }} />
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 8, marginBottom: 10 }}>
+                    <label>起始 <input value={convOpts.from} onChange={e => setConvOpt('from', e.target.value)} placeholder="如 10:00，可留空" style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                    <label>结束 <input value={convOpts.to} onChange={e => setConvOpt('to', e.target.value)} placeholder="如 1:30:00，可留空" style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                    <label>延迟秒 <input value={convOpts.delay} onChange={e => setConvOpt('delay', e.target.value)} placeholder="可为负，如 -2.5" style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                    <label>剔除正则 <input value={convOpts.filter} onChange={e => setConvOpt('filter', e.target.value)} placeholder="如 666+" style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                    <label>字号 <input type="number" value={convOpts.fontsize} onChange={e => setConvOpt('fontsize', e.target.value)} style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                    <label>滚动秒数 <input type="number" value={convOpts.duration} onChange={e => setConvOpt('duration', e.target.value)} style={{ width: '100%', padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} /></label>
+                  </div>
+                  <button onClick={convertFile} style={{ padding: '6px 16px', background: '#f60', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer' }}>
+                    转换并下载 .ass
+                  </button>
+                  {convMsg && (
+                    <div style={{ marginTop: 8, color: convMsg.ok ? '#0a0' : 'red' }}>{convMsg.text}</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )
     }
