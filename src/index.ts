@@ -15,6 +15,7 @@ import { createDefaultMessageEvents, type MessageHandler, type MessageEventMap }
 
 export { STT } from './core/stt';
 export { Packet } from './core/packet';
+export * from './core/danmaku';
 export type {
   STTValue,
   STTObject,
@@ -29,6 +30,16 @@ export type {
   ChatMsg,
   LoginRes,
   UEnter,
+  RecordMeta,
+  RecordedMessage,
+  ParsedRecord,
+  ConvertWindow,
+  FilterScript,
+  FilterRules,
+  DanmakuItem,
+  LayoutConfig,
+  PositionedDanmaku,
+  AssOptions,
 } from './types';
 
 function defaultWsFactory(url: string): IWebSocket {

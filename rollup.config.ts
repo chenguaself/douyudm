@@ -65,7 +65,7 @@ const config = [
       format: 'cjs',
       banner: '#!/usr/bin/env node',
     },
-    external: ['ws', 'lowdb', 'lowdb/adapters/FileSync', 'commander'],
+    external: ['ws', 'lowdb', 'lowdb/adapters/FileSync', 'commander', 'fs', 'path', 'url'],
     plugins: basePlugins(),
   },
 ];

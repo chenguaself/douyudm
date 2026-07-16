@@ -41,6 +41,35 @@ douyudm -i 9999 --ignore mrkl,uenter
 douyudm --help
 ```
 
+### 录制与 ASS 字幕导出
+
+```shell
+# 边看边录制为 JSONL（默认只录 chatmsg，Ctrl+C 停止）
+douyudm -i 9999 --record live.jsonl
+
+# 追加录制其他事件
+douyudm -i 9999 --record live.jsonl --record-events chatmsg,uenter,gdp
+
+# 转换为 ASS 字幕（配合录播视频加载）
+douyudm convert live.jsonl -o live.ass
+
+# 裁剪时间段 + 整体延迟（对齐视频）
+douyudm convert live.jsonl --from 10:00 --to 1:30:00 --delay=-2.5
+
+# 过滤：正则剔除弹幕/用户（可重复，支持 /pattern/flags）
+douyudm convert live.jsonl --filter '/666+/' --filter-user '^bot'
+
+# 可编程过滤（如接大模型批量判定），脚本 default export 二选一：
+#   (msg) => boolean | Promise<boolean>          逐条，true 保留
+#   { batch: async (msgs) => msgs的保留子集 }     批量
+douyudm convert live.jsonl --filter-script ./my-filter.mjs
+
+# 画布/样式调整
+douyudm convert live.jsonl --width 1280 --height 720 --fontsize 36 --duration 8 --opacity 0.6
+```
+
+录制文件为 JSONL：首行 meta（房间号、开始时刻），之后每行一条消息（`ts` + 原始字段），append-only 崩溃安全。过滤只在 convert 时生效，原始录制永远完整。过滤脚本示例见 [examples/filter-scripts/](examples/filter-scripts/)。
+
 ## API 使用
 
 ### Node.js

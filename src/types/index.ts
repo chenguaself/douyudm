@@ -79,3 +79,94 @@ export interface UEnter extends STTObject {
   nn: string;
   level: string;
 }
+
+// ─── Danmaku Record / ASS Convert ─────────────────────────────────────────────
+
+/** 录制文件（JSONL）第一行的 meta 记录 */
+export interface RecordMeta {
+  __meta: 'douyudm-record';
+  version: number;
+  rid: string;
+  /** 录制开始时刻 epoch ms，也是字幕 0 点 */
+  startedAt: number;
+}
+
+/** 录制的一条消息：收到时刻 + JSON 化的原始 STT 字段 */
+export interface RecordedMessage {
+  /** 收到时刻 epoch ms */
+  ts: number;
+  /** 消息类型（chatmsg 等） */
+  type: string;
+  /** 弹幕文本（chatmsg 才有） */
+  txt?: string;
+  /** 发送者昵称 */
+  nn?: string;
+  [key: string]: unknown;
+}
+
+export interface ParsedRecord {
+  meta: RecordMeta | null;
+  messages: RecordedMessage[];
+  /** 无法解析而被跳过的行数 */
+  badLines: number;
+}
+
+/** RecordedMessage → 字幕时间轴的换算窗口 */
+export interface ConvertWindow {
+  /** 字幕 0 点 epoch ms（通常 = meta.startedAt） */
+  zeroAt: number;
+  /** 裁剪起点（秒，相对 zeroAt）；裁剪后字幕 0 点对齐到这里 */
+  from?: number;
+  /** 裁剪终点（秒，相对 zeroAt） */
+  to?: number;
+  /** 整体平移秒，可负 */
+  delay?: number;
+}
+
+/** 过滤 hook：predicate（true 保留）或 batch（返回保留集合） */
+export type FilterScript =
+  | ((msg: RecordedMessage) => boolean | Promise<boolean>)
+  | { batch: (msgs: RecordedMessage[]) => RecordedMessage[] | Promise<RecordedMessage[]> };
+
+export interface FilterRules {
+  /** 匹配 txt 即剔除 */
+  text?: RegExp[];
+  /** 匹配 nn 即剔除 */
+  user?: RegExp[];
+  script?: FilterScript;
+}
+
+/** 参与排版/渲染的最小弹幕单元 */
+export interface DanmakuItem {
+  /** 相对字幕 0 点的出现时刻（秒） */
+  start: number;
+  text: string;
+}
+
+export interface LayoutConfig {
+  width: number;
+  height: number;
+  fontSize: number;
+  /** 单条弹幕从进入到完全离开的秒数 */
+  duration: number;
+}
+
+export interface PositionedDanmaku extends DanmakuItem {
+  /** = start + duration */
+  end: number;
+  /** 估算像素宽 */
+  width: number;
+  x1: number;
+  x2: number;
+  y: number;
+}
+
+export interface AssOptions {
+  width?: number;
+  height?: number;
+  fontSize?: number;
+  fontName?: string;
+  duration?: number;
+  /** 0(全透明)~1(不透明)，默认 0.8 */
+  opacity?: number;
+}
