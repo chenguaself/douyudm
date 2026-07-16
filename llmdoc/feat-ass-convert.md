@@ -21,7 +21,7 @@
 
 core 层不碰 fs/net，浏览器可用；类型进 `src/types/index.ts`；从 `src/index.ts` 与两个 platform 入口导出。
 
-浏览器示例（`examples/browser/index.html`）用同一套函数实现了页面内录制（消息攒在内存，下载为 .jsonl，格式和 CLI 一致）和本地转换（文件选择 → 下载 .ass）。页面检测 `douyudm.parseRecord` 是否存在——CDN 拉到旧版本库时自动隐藏这两块 UI，不报错。
+浏览器示例（`examples/browser/index.html`）用同一套函数实现了页面内录制和本地转换（文件选择 → 下载 .ass）。录制不在内存里攒（长时间录制会越积越多直到页面被浏览器杀掉），而是每 50 条或 3 秒批量写入 IndexedDB；好处是页面刷新/意外关闭后数据仍在，"历史录制"列表可下载/删除，下载的 .jsonl 格式和 CLI 一致。页面检测 `douyudm.parseRecord` 是否存在——CDN 拉到旧版本库时自动隐藏这两块 UI，不报错。
 
 ## 录制格式（JSONL）
 
